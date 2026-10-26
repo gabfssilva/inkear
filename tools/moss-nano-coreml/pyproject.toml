@@ -1,0 +1,31 @@
+[project]
+name = "moss-nano-coreml"
+version = "0.1.0"
+description = "Converts MOSS-TTS-Nano to Core ML for the Neural Engine and checks it against the PyTorch reference"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "coremltools==9.0",
+    "huggingface-hub==0.36.0",
+    "mlx-whisper==0.4.3",
+    "numpy==2.2.6",
+    "scipy==1.16.2",
+    "sentencepiece==0.2.1",
+    "soundfile==0.13.1",
+    "torch==2.7.0",
+    "torchaudio==2.7.0",
+    "transformers==4.57.1",
+]
+
+[project.scripts]
+moss-nano-convert = "moss_nano_coreml.convert:main"
+moss-nano-report = "moss_nano_coreml.report:main"
+
+[dependency-groups]
+dev = ["ruff==0.17.0"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110

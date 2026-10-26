@@ -1,0 +1,30 @@
+[project]
+name = "magpie-coreml"
+version = "0.1.0"
+description = "Converts NVIDIA Magpie TTS Multilingual 357M (v2607) to Core ML and checks it against the NeMo reference"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "coremltools==9.0",
+    "mlx-whisper==0.4.3",
+    "nemo-toolkit[tts] @ git+https://github.com/NVIDIA-NeMo/Speech@d8e1d9981491083bbc6fab23080f2c75a6284308",
+    "peft==0.21.2",
+    "torch==2.7.1",
+]
+
+[project.scripts]
+magpie-convert = "magpie_coreml.convert:main"
+magpie-report = "magpie_coreml.report:main"
+
+[dependency-groups]
+dev = ["ruff==0.15.12"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110
+
+[tool.uv]
+# NeMo main pins CUDA torch wheels through its own [tool.uv.sources]; this project needs the PyPI build.
+no-sources = true

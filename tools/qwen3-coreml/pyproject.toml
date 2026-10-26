@@ -1,0 +1,29 @@
+[project]
+name = "qwen3-coreml"
+version = "0.1.0"
+description = "Converts Qwen3-TTS 12Hz 0.6B to Core ML for the Neural Engine and checks it against the PyTorch reference"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "coremltools==9.0",
+    "mlx-whisper==0.4.3",
+    "numpy==2.2.6",
+    "qwen-tts==0.1.1",
+    "soundfile==0.13.1",
+    "torch==2.7.1",
+    "torchaudio==2.7.1",
+    "transformers==4.57.3",
+]
+
+[project.scripts]
+qwen3-convert = "qwen3_coreml.convert:main"
+qwen3-report = "qwen3_coreml.report:main"
+
+[dependency-groups]
+dev = ["ruff>=0.8"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110

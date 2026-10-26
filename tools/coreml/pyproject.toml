@@ -1,0 +1,34 @@
+[project]
+name = "supertonic-coreml"
+version = "0.1.0"
+description = "Converts Supertonic 3 to Core ML and checks it against the ONNX reference"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "coremltools>=9.0",
+    "huggingface-hub>=1.0",
+    "numpy>=2.0",
+    "onnx>=1.17",
+    "onnx2torch>=1.5",
+    "onnxruntime>=1.20",
+    "onnxslim>=0.1",
+    "torch==2.7.*",
+]
+
+[project.scripts]
+supertonic-convert = "supertonic_coreml.coreml:main"
+supertonic-report = "supertonic_coreml.report:main"
+supertonic-fixtures = "supertonic_coreml.fixtures:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-describe>=2", "ruff>=0.8"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+describe_prefixes = ["describe_", "when_"]

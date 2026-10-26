@@ -1,0 +1,15 @@
+[
+  {"file": "pt-book-dom-casmurro.pdf", "title": "Dom Casmurro (Machado de Assis)", "language": "pt-BR", "kind": "book", "source": "Domínio Público / MEC (www.dominiopublico.gov.br)", "license": "public domain"},
+  {"file": "pt-book-bras-cubas.pdf", "title": "Memórias Póstumas de Brás Cubas (Machado de Assis)", "language": "pt-BR", "kind": "book", "source": "eBooksBrasil (www.ebooksbrasil.org)", "license": "public domain text"},
+  {"file": "pt-book-o-mulato.pdf", "title": "O Mulato (Aluísio Azevedo)", "language": "pt-BR", "kind": "book", "source": "eBooksBrasil (www.ebooksbrasil.org)", "license": "public domain text"},
+  {"file": "pt-book-pro-git.pdf", "title": "Pro Git, 2ª edição (Scott Chacon, Ben Straub), tradução pt-BR", "language": "pt-BR", "kind": "book", "source": "git-scm.com/book/pt-br", "license": "CC BY-NC-SA 3.0"},
+  {"file": "pt-paper-csp.pdf", "title": "Fatores associados ao nascimento pré-termo (Cadernos de Saúde Pública)", "language": "pt-BR", "kind": "paper", "source": "https://www.scielo.br/j/csp/a/CCFn5kvvbfQKd4hvqyJnnjK/", "license": "CC BY"},
+  {"file": "pt-paper-rbef.pdf", "title": "A importância das redes de monitoramento de meteoros (Revista Brasileira de Ensino de Física)", "language": "pt-BR", "kind": "paper", "source": "https://www.scielo.br/j/rbef/a/y8bqvjMGccgDGhHrWG54NYS/", "license": "CC BY"},
+  {"file": "pt-paper-rbh.pdf", "title": "Black Rio: música, política e identidade negra (Revista Brasileira de História)", "language": "pt-BR", "kind": "paper", "source": "https://www.scielo.br/j/rbh/a/nXpdfHJmmdw64K5B4mH4Ypy/", "license": "CC BY"},
+  {"file": "pt-scan-esau-e-jacob.pdf", "title": "Esaú e Jacob (Machado de Assis, 1920 microform), first 30 pages rasterized without text layer", "language": "pt-BR", "kind": "scan", "source": "https://archive.org/details/3441027", "license": "not in copyright"},
+  {"file": "en-book-think-python.pdf", "title": "Think Python, 2nd edition (Allen B. Downey)", "language": "en", "kind": "book", "source": "https://greenteapress.com/wp/think-python-2e/", "license": "CC BY-NC 3.0"},
+  {"file": "en-book-ocr-alice.pdf", "title": "Alice's Adventures in Wonderland (1888), scan with OCR text layer", "language": "en", "kind": "book", "source": "https://archive.org/details/alicesadventures88carr", "license": "not in copyright"},
+  {"file": "en-scan-alice.pdf", "title": "Alice's Adventures in Wonderland (1888), first 30 pages rasterized without text layer", "language": "en", "kind": "scan", "source": "https://archive.org/details/alicesadventures88carr", "license": "not in copyright"},
+  {"file": "en-paper-2col-bert.pdf", "title": "BERT: Pre-training of Deep Bidirectional Transformers (NAACL 2019)", "language": "en", "kind": "paper", "source": "https://aclanthology.org/N19-1423/", "license": "CC BY 4.0"},
+  {"file": "en-paper-t5.pdf", "title": "Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer (JMLR 2020)", "language": "en", "kind": "paper", "source": "https://jmlr.org/papers/v21/20-074.html", "license": "CC BY 4.0"}
+]

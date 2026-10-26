@@ -1,0 +1,29 @@
+[project]
+name = "omnivoice-coreml"
+version = "0.1.0"
+description = "Converts OmniVoice to Core ML for the Neural Engine and checks it against the PyTorch reference"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "coremltools==9.0",
+    "huggingface-hub==2.2.0",
+    "mlx-whisper==0.4.3",
+    "numpy==2.5.4",
+    "omnivoice==0.2.1",
+    "soundfile==0.14.0",
+    "torch==2.7.1",
+    "torchaudio==2.7.1",
+]
+
+[project.scripts]
+omnivoice-convert = "omnivoice_coreml.convert:main"
+omnivoice-report = "omnivoice_coreml.report:main"
+
+[dependency-groups]
+dev = ["ruff==0.17.0"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110

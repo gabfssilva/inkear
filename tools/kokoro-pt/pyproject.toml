@@ -1,0 +1,22 @@
+[project]
+name = "kokoro-pt"
+version = "0.1.0"
+description = "Compares Brazilian Portuguese phonemizers for Kokoro against espeak-ng"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "coremltools>=9.0",
+    "huggingface-hub>=1.0",
+    "jiwer>=3.0",
+    "kokoro>=0.9.4",
+    "mlx-whisper>=0.4",
+    "numpy>=2.0",
+    "pymupdf>=1.24",
+    "soundfile>=0.12",
+]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 110

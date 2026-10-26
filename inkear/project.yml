@@ -1,0 +1,91 @@
+name: inkear
+options:
+  bundleIdPrefix: dev.gabfssilva
+  deploymentTarget:
+    iOS: "27.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+packages:
+  InkearKit:
+    path: ../InkearKit
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: 4G3KN44SFU
+targets:
+  inkear:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    dependencies:
+      - package: InkearKit
+        products: [PDFStructure, Synthesis, Engines, Library, Playback]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.gabfssilva.inkear
+        PRODUCT_NAME: inkear
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        LOCALIZATION_PREFERS_STRING_CATALOGS: YES
+        SWIFT_EMIT_LOC_STRINGS: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+    entitlements:
+      path: inkear.entitlements
+      properties:
+        # The Neural Engine's memory counts against the app since iOS 27.
+        com.apple.developer.kernel.increased-memory-limit: true
+        # Required by iOS 27 for any Neural Engine work while the app is in the background.
+        com.apple.developer.background-tasks.continued-processing.inference: true
+    postCompileScripts:
+      - name: Bundle Supertonic
+        path: Scripts/bundle-supertonic.sh
+        basedOnDependencyAnalysis: false
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: inkear
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, pt-BR]
+        CFBundleShortVersionString: "0.0.2"
+        CFBundleVersion: "2"
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+          UIImageName: LaunchLogo
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
+        BGTaskSchedulerPermittedIdentifiers: [dev.gabfssilva.inkear.prepare.*]
+        LSSupportsOpeningDocumentsInPlace: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.adobe.pdf]
+        UIAppFonts: [Geist.ttf, GeistMono.ttf, Newsreader.ttf, Newsreader-Italic.ttf]
+        ITSAppUsesNonExemptEncryption: false
+  inkearUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: inkear
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.gabfssilva.inkear.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  inkear:
+    build:
+      targets:
+        inkear: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - inkearUITests

@@ -1,0 +1,27 @@
+[project]
+name = "chatterbox-coreai"
+version = "0.1.0"
+description = "Converts the Chatterbox pt-BR pack to Core AI models for the Neural Engine"
+requires-python = ">=3.13,<3.14"
+dependencies = ["coreai-torch==0.4.3", "chatterbox-coreml"]
+
+[project.scripts]
+chatterbox-coreai-convert = "chatterbox_coreai.convert:main"
+
+[dependency-groups]
+dev = ["ruff==0.17.0"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+# coreai-torch needs torch 2.8 or later and numpy 2.3 to 2.4; chatterbox-coreml pins the versions coremltools 9.0
+# converts with.
+override-dependencies = ["torch==2.14.1", "torchaudio==2.11.0", "numpy==2.4.6"]
+
+[tool.uv.sources]
+chatterbox-coreml = { path = "../chatterbox-coreml", editable = true }
+
+[tool.ruff]
+line-length = 110
