@@ -1,0 +1,683 @@
+diff --git a/ios/PhononTTS/Sources/PhononTTS/Phonon.swift b/ios/PhononTTS/Sources/PhononTTS/Phonon.swift
+index ee3e4ff..82e16f2 100644
+--- a/ios/PhononTTS/Sources/PhononTTS/Phonon.swift
++++ b/ios/PhononTTS/Sources/PhononTTS/Phonon.swift
+@@ -71,6 +71,7 @@ public final class Phonon: @unchecked Sendable {
+     private let queue: DispatchQueue
+     private let current: Mutex<String>
+     private let currentLanguage: Mutex<Language>
++    private let currentSteps: Mutex<Int>
+ 
+     /// The voice speaking, one of `voices`.
+     public var voice: String { current.withLock { $0 } }
+@@ -86,6 +87,7 @@ public final class Phonon: @unchecked Sendable {
+         languages = Self.names(ptts_languages(handle))
+         current = Mutex(names.first ?? "")
+         currentLanguage = Mutex(language)
++        currentSteps = Mutex(Int(ptts_steps(handle)))
+     }
+ 
+     private static func names(_ block: UnsafePointer<CChar>?) -> [String] {
+@@ -170,6 +172,21 @@ public final class Phonon: @unchecked Sendable {
+         currentLanguage.withLock { $0 = language }
+     }
+ 
++    /// Euler steps of the flow per frame, as the bundle sets them or `setSteps(_:)` last did.
++    public var steps: Int { currentSteps.withLock { $0 } }
++
++    /// Take `steps` Euler steps of the flow per frame from the next utterance on. More steps
++    /// give cleaner audio and cost one more run of the flow net each, a small part of a frame.
++    /// Nothing is reloaded, so this is immediate.
++    public func setSteps(_ steps: Int) async throws {
++        guard steps >= 1 else { throw PhononError(description: "the flow takes at least one step") }
++        let h = Pointer(p: handle)
++        try await Self.run(on: queue) {
++            guard ptts_set_steps(h.p, UInt32(steps)) else { throw Self.lastError(h.p) }
++        }
++        currentSteps.withLock { $0 = steps }
++    }
++
+     private final class Sink: @unchecked Sendable {
+         let onAudio: ([Float]) -> Void
+         let stop = Atomic<Bool>(false)
+diff --git a/ptts-coreml/src/phonon/driver.rs b/ptts-coreml/src/phonon/driver.rs
+index 03d9cdb..6c0f57f 100644
+--- a/ptts-coreml/src/phonon/driver.rs
++++ b/ptts-coreml/src/phonon/driver.rs
+@@ -1,9 +1,10 @@
+-//! Drive the three CoreML graphs as one TTS pipeline.
++//! Drive the four CoreML graphs as one TTS pipeline.
+ //!
+ //! Voice conditioning runs once per voice and is kept as a snapshot of the KV cache. Each
+ //! utterance then restores that snapshot, pushes the text through the batched prefill graph,
+ //! and decodes frames until the EOS head fires, with Mimi decoding frame N on a worker thread
+-//! while the flow LM runs frame N+1.
++//! while the flow LM runs frame N+1. Each frame takes the decode graph once, which also runs
++//! the first flow step, and the flow step graph once for every step after that.
+ 
+ use super::{flow_lm as fl, mimi};
+ use crate::run::{Buf, Compute, Model, Session};
+@@ -27,6 +28,11 @@ pub struct Config {
+     /// the wrong distribution distorts the voice while leaving it intelligible.
+     pub temperature: f32,
+     pub seed: u64,
++    /// Euler steps of the flow per frame: more is cleaner and slower. The checkpoint was
++    /// distilled for one.
++    pub steps: usize,
++    /// The checkpoint's time-embedding norm, for the steps' time conditions.
++    pub time_norm: fl::TimeNorm,
+     /// Where the flow LM runs. Mimi is f32 and always runs on the CPU.
+     pub flow_unit: Compute,
+ }
+@@ -78,27 +84,30 @@ struct Flow {
+ 
+ impl Flow {
+     fn new(model: Model, dm: fl::Dims, t: usize, ctx: usize, ring: &Ring) -> Result<Self, String> {
+-        let small: [(&str, &[usize]); 5] = [
++        let small: [(&str, &[usize]); 7] = [
+             ("emb", &[1, t, dm.d]),
+             ("cos", &[1, 1, t, dm.hd() / 2]),
+             ("sin", &[1, 1, t, dm.hd() / 2]),
+             ("mask", &[1, 1, t, ctx + t]),
+             ("noise", &[1, dm.ldim]),
++            ("ts", &[1, dm.flow_d]),
++            ("dt", &[1, 1]),
+         ];
+         let session = model.session(&small, &[("k_all_in", &ring.k), ("v_all_in", &ring.v)])?;
+         Ok(Flow { model, dm, t, session })
+     }
+ 
+-    /// One call of `t` rows at rope position `pos`, whose real rows are marked in `rows_valid`.
+-    /// Writes the rows into the ring and returns `(next_latent, eos)`.
++    /// One call of `t` rows at rope position `pos`, whose real rows are marked in `rows_valid`,
++    /// taking the first flow step with `time`. Writes the rows into the ring and returns
++    /// `(next_latent, eos, cond)`.
+     fn step(
+         &self,
+         ring: &mut Ring,
+         pos: usize,
+         emb: &[f32],
+-        noise: &[f32],
++        (noise, time): (&[f32], &StepTime),
+         rows_valid: &[bool],
+-    ) -> Result<(Vec<f32>, f32), String> {
++    ) -> Result<(Vec<f32>, f32, Vec<f32>), String> {
+         let (t, ctx) = (self.t, ring.valid.len());
+         if ring.written + t > ctx {
+             return Err(format!("sequence of {} does not fit ctx {ctx}", ring.written + t));
+@@ -107,7 +116,15 @@ impl Flow {
+         let mask = ring_mask(&ring.valid, t, ctx);
+         let mut out = self.model.predict(
+             &self.session,
+-            &[("emb", emb), ("cos", &c), ("sin", &s), ("mask", &mask), ("noise", noise)],
++            &[
++                ("emb", emb),
++                ("cos", &c),
++                ("sin", &s),
++                ("mask", &mask),
++                ("noise", noise),
++                ("ts", &time.ts),
++                ("dt", &time.dt),
++            ],
+         )?;
+         let k = out.remove("k_new").ok_or("flow LM produced no k_new")?;
+         let v = out.remove("v_new").ok_or("flow LM produced no v_new")?;
+@@ -119,14 +136,60 @@ impl Flow {
+         ring.written += t;
+         let next = out.remove("next_latent").ok_or("flow LM produced no latent")?;
+         let eos = out.get("eos").and_then(|v| v.first().copied()).unwrap_or(0.0);
+-        Ok((next, eos))
++        let cond = out.remove("cond").ok_or("flow LM produced no cond")?;
++        Ok((next, eos, cond))
+     }
+ }
+ 
++/// One Euler step's time condition and length, as the flow graphs take them.
++struct StepTime {
++    ts: Vec<f32>,
++    dt: [f32; 1],
++}
++
++/// The flow net alone, for every step after the first.
++struct FlowStep {
++    model: Model,
++    session: Session,
++}
++
++impl FlowStep {
++    fn new(model: Model, dm: fl::Dims) -> Result<Self, String> {
++        let small: [(&str, &[usize]); 4] = [
++            ("cond", &[1, dm.d]),
++            ("x", &[1, dm.ldim]),
++            ("ts", &[1, dm.flow_d]),
++            ("dt", &[1, 1]),
++        ];
++        let session = model.session(&small, &[])?;
++        Ok(FlowStep { model, session })
++    }
++
++    /// `x` after one more step of the flow, conditioned on the transformer's `cond`.
++    fn step(&self, cond: &[f32], x: &[f32], time: &StepTime) -> Result<Vec<f32>, String> {
++        let mut out = self.model.predict(
++            &self.session,
++            &[("cond", cond), ("x", x), ("ts", &time.ts), ("dt", &time.dt)],
++        )?;
++        out.remove("next_latent").ok_or_else(|| "flow step produced no latent".into())
++    }
++}
++
++/// The time conditions of `steps` Euler steps from 0 to 1.
++fn step_times(host: &Weights, steps: usize, norm: fl::TimeNorm) -> Result<Vec<StepTime>, String> {
++    let dt = [1.0 / steps as f32];
++    Ok(fl::step_times(host, steps, norm)?.into_iter().map(|ts| StepTime { ts, dt }).collect())
++}
++
+ pub struct Phonon {
+     decode: Flow,
+     prefill: Flow,
++    flow_step: FlowStep,
+     mimi: Model,
++    /// The host tensors, kept for the time embedders when the number of steps changes.
++    host: Weights,
++    /// One per flow step of every frame.
++    times: Vec<StepTime>,
+     ring: Ring,
+     /// The ring just after voice conditioning, restored at the start of every utterance.
+     voice_ring: Option<Ring>,
+@@ -302,6 +365,8 @@ impl Phonon {
+         let decode = Flow::new(decode, dm, 1, cfg.ctx, &ring)?;
+         let prefill = load(dir, &fl::package_name(cfg.ctx, cfg.prefill_len), cfg.flow_unit)?;
+         let prefill = Flow::new(prefill, dm, cfg.prefill_len, cfg.ctx, &ring)?;
++        let flow_step = FlowStep::new(load(dir, fl::STEP_PACKAGE, cfg.flow_unit)?, dm)?;
++        let times = step_times(&wt, cfg.steps, cfg.time_norm)?;
+         let mimi = load(dir, &mimi::package_name(cfg.mimi_window), Compute::CpuOnly)?;
+ 
+         // Bundles exported before the conditioners came from the config call it `num_speakers`,
+@@ -316,16 +381,22 @@ impl Phonon {
+             return Err(format!("the bundle's conditions are {n} wide, the model is {}", dm.d));
+         }
+ 
++        let il = wt.data("flow_lm.input_linear.weight")?.to_vec();
++        let bos = wt.data("flow_lm.bos_emb")?.to_vec();
++        let text_emb = wt.data("flow_lm.conditioner.embed.weight")?.to_vec();
+         let mut me = Self {
+             decode,
+             prefill,
++            flow_step,
+             mimi,
++            host: wt,
++            times,
+             ring,
+             voice_ring: None,
+-            il: wt.data("flow_lm.input_linear.weight")?.to_vec(),
++            il,
+             conditions,
+-            bos: wt.data("flow_lm.bos_emb")?.to_vec(),
+-            text_emb: wt.data("flow_lm.conditioner.embed.weight")?.to_vec(),
++            bos,
++            text_emb,
+             voice: Voice { emb: Vec::new(), len: 0, conditions: None },
+             cfg,
+         };
+@@ -336,7 +407,9 @@ impl Phonon {
+         // what this writes into it is never read.
+         let zero = vec![0f32; dm.ldim];
+         let (plen, vlen) = (me.cfg.prefill_len, me.voice.len);
+-        me.prefill.step(&mut me.ring, vlen, &vec![0f32; plen * dm.d], &zero, &vec![false; plen])?;
++        let (prefill, ring, time) = (&me.prefill, &mut me.ring, &me.times[0]);
++        prefill.step(ring, vlen, &vec![0f32; plen * dm.d], (&zero, time), &vec![false; plen])?;
++        me.flow_step.step(&vec![0f32; dm.d], &zero, time)?;
+         MimiStream::new(&me.mimi, me.cfg.mimi_window, dm.ldim)?.decode(0, &zero)?;
+         Ok(me)
+     }
+@@ -361,6 +434,18 @@ impl Phonon {
+         self.condition()
+     }
+ 
++    /// Take `steps` Euler steps of the flow per frame from the next utterance on.
++    pub fn set_steps(&mut self, steps: usize) -> Result<(), String> {
++        self.times = step_times(&self.host, steps, self.cfg.time_norm)?;
++        self.cfg.steps = steps;
++        Ok(())
++    }
++
++    /// Euler steps of the flow per frame.
++    pub fn steps(&self) -> usize {
++        self.cfg.steps
++    }
++
+     /// Longest prompt the prefill graph takes, in tokens.
+     pub fn max_tokens(&self) -> usize {
+         self.cfg.prefill_len
+@@ -379,7 +464,7 @@ impl Phonon {
+         // every later frame, so conditioning stays exact and runs when the voice is set instead.
+         for i in 0..self.voice.len {
+             let emb = &self.voice.emb[i * d..(i + 1) * d];
+-            self.decode.step(ring, i, emb, &zero, &[true])?;
++            self.decode.step(ring, i, emb, (&zero, &self.times[0]), &[true])?;
+         }
+         let mut snap = Ring::new(&self.cfg.dims, self.cfg.ctx)?;
+         snap.restore(ring);
+@@ -415,7 +500,8 @@ impl Phonon {
+         }
+         let rows_valid: Vec<bool> = (0..plen).map(|r| r < tokens.len()).collect();
+         let zero = vec![0f32; self.cfg.dims.ldim];
+-        self.prefill.step(&mut self.ring, self.voice.len, &temb, &zero, &rows_valid)?;
++        let time = &self.times[0];
++        self.prefill.step(&mut self.ring, self.voice.len, &temb, (&zero, time), &rows_valid)?;
+ 
+         // Same generator and distribution as the reference implementation.
+         use rand::{Rng, SeedableRng};
+@@ -424,7 +510,8 @@ impl Phonon {
+             .map_err(|e| format!("noise distribution: {e}"))?;
+ 
+         let mut stream = MimiStream::new(&self.mimi, self.cfg.mimi_window, self.cfg.dims.ldim)?;
+-        let (decode, ring) = (&self.decode, &mut self.ring);
++        let (decode, flow_step, times, ring) =
++            (&self.decode, &self.flow_step, &self.times, &mut self.ring);
+         let conditions = self.voice.conditions.as_ref().unwrap_or(&self.conditions);
+         let (il, cfg) = (&self.il, &self.cfg);
+         let pos0 = self.voice.len + tokens.len();
+@@ -467,7 +554,11 @@ impl Phonon {
+                     let row = &il[o * cfg.dims.ldim..(o + 1) * cfg.dims.ldim];
+                     *e += row.iter().zip(lat.iter()).map(|(a, b)| a * b).sum::<f32>();
+                 }
+-                let (next, eos) = decode.step(ring, pos0 + i, &emb, &noise, &[true])?;
++                let (mut next, eos, cond) =
++                    decode.step(ring, pos0 + i, &emb, (&noise, &times[0]), &[true])?;
++                for time in &times[1..] {
++                    next = flow_step.step(&cond, &next, time)?;
++                }
+                 lat_tx.send((i, next.clone())).map_err(|_| "mimi worker died")?;
+                 // Stay one frame ahead: collect frame i-1 so the queue cannot run away.
+                 if i > 0 && !deliver(pcm_rx.recv().map_err(|_| "mimi worker died")??) {
+diff --git a/ptts-coreml/src/phonon/flow_lm.rs b/ptts-coreml/src/phonon/flow_lm.rs
+index 705ee3c..adc5b20 100644
+--- a/ptts-coreml/src/phonon/flow_lm.rs
++++ b/ptts-coreml/src/phonon/flow_lm.rs
+@@ -1,8 +1,9 @@
+ //! Build the flow LM graph: one call of `t` positions against a host-managed ring KV cache.
+ //!
+-//! `emb -> transformer layers -> out_norm -> (eos logit, flow_net sample)`, plus each layer's
++//! `emb -> transformer layers -> out_norm -> (eos logit, first flow step)`, plus each layer's
+ //! new K and V rows. The same graph at `t = 1` is the decode step and at `t = prefill_len` the
+-//! batched text prefill.
++//! batched text prefill. A second, small graph runs the flow net alone for every later step, so
++//! the number of steps per frame is the host's choice.
+ //!
+ //! Three things keep it on the Neural Engine, and each one fails silently when broken, by
+ //! planning the whole graph back onto the CPU:
+@@ -214,8 +215,16 @@ pub enum TimeNorm {
+     RmsVar,
+ }
+ 
+-/// `TimestepEmbedder` at a fixed time, in f32 on the host: the step always goes from s = 0 to
+-/// t = 1, so the embedding is a constant of the checkpoint and the graph only needs its value.
++/// Package name of the flow step graph, which runs the flow net alone for every step after the
++/// first.
++pub const STEP_PACKAGE: &str = "flow-step";
++
++/// The tensors [`step_times`] reads, which the exporter copies into the host's weights.
++pub const TIME_EMBED_TENSORS: [&str; 6] =
++    ["freqs", "mlp.0.weight", "mlp.0.bias", "mlp.2.weight", "mlp.2.bias", "mlp.3.alpha"];
++
++/// `TimestepEmbedder` at time `t`, in f32 on the host: the graphs take the embedding as an
++/// input, so the number of steps is chosen at run time.
+ /// It ends in `norm`, which has to be the one the checkpoint was trained with: the two only
+ /// agree when the mean is near zero, true enough for one checkpoint to look exact and wrong for
+ /// another.
+@@ -249,6 +258,22 @@ fn time_embed(wt: &Weights, idx: usize, t: f32, norm: TimeNorm) -> Result<Vec<f3
+     Ok(h.iter().zip(alpha).map(|(v, a)| v * inv * a).collect())
+ }
+ 
++/// The flow net's time condition for each of `steps` Euler steps, as `lsd_decode` takes them:
++/// step `i` goes from `s = i / steps` to `t = (i + 1) / steps`, and the net sees the two
++/// embeddings averaged, as `SimpleMLPAdaLN::forward` does.
++pub fn step_times(wt: &Weights, steps: usize, norm: TimeNorm) -> Result<Vec<Vec<f32>>, String> {
++    if steps == 0 {
++        return Err("the flow takes at least one step".into());
++    }
++    (0..steps)
++        .map(|i| {
++            let s = time_embed(wt, 0, i as f32 / steps as f32, norm)?;
++            let t = time_embed(wt, 1, (i + 1) as f32 / steps as f32, norm)?;
++            Ok(s.iter().zip(&t).map(|(a, b)| (a + b) * 0.5).collect())
++        })
++        .collect()
++}
++
+ fn modulate(b: &mut Builder, x: &Var, shift: &Var, scale: &Var, n: usize) -> Var {
+     let one = b.scalar_f32(1.0);
+     let s = b.add(scale, &one, &[1, n]);
+@@ -262,20 +287,16 @@ fn flow_net(
+     wt: &Weights,
+     cond: &Var,
+     noise: &Var,
+-    time_norm: TimeNorm,
++    ts: &Var,
+ ) -> Result<Var, String> {
+     let p = "flow_lm.flow_net";
+     let iw = w(b, wt, &format!("{p}.input_proj.weight"))?;
+     let ib = w(b, wt, &format!("{p}.input_proj.bias"))?;
+     let mut x = b.linear(noise, &iw, Some(&ib), &[1, dm.flow_d]);
+-    // The two time conditions averaged, as `SimpleMLPAdaLN::forward` does.
+-    let (t0, t1) = (time_embed(wt, 0, 0.0, time_norm)?, time_embed(wt, 1, 1.0, time_norm)?);
+-    let ts: Vec<f32> = t0.iter().zip(&t1).map(|(a, b)| (a + b) * 0.5).collect();
+-    let ts = b.const_f32(&ts, &[1, dm.flow_d]);
+     let cw = w(b, wt, &format!("{p}.cond_embed.weight"))?;
+     let cb = w(b, wt, &format!("{p}.cond_embed.bias"))?;
+     let c = b.linear(cond, &cw, Some(&cb), &[1, dm.flow_d]);
+-    let y = b.add(&ts, &c, &[1, dm.flow_d]);
++    let y = b.add(ts, &c, &[1, dm.flow_d]);
+     let fd = dm.flow_d as i32;
+ 
+     for i in 0..dm.flow_blocks {
+@@ -322,22 +343,20 @@ fn flow_net(
+ ///
+ /// Inputs: `emb [1, t, D]` (the host applies `input_linear` and the speaker embedding, so the
+ /// same graph serves prefill and decode), `cos`/`sin [1, 1, t, HD/2]`, `mask [1, 1, t, ctx + t]`,
+-/// `noise [1, LDIM]`, and the ring `k_all_in`/`v_all_in [L, H, ctx, HD]`. Outputs: `next_latent`
+-/// and `eos` for the last position, and `k_new`/`v_new [L, H, t, HD]` for the host to store.
+-/// `time_norm` is the checkpoint's time-embedding norm, baked into the graph as a constant.
+-pub fn build(
+-    wt: &Weights,
+-    dm: &Dims,
+-    ctx: usize,
+-    t: usize,
+-    time_norm: TimeNorm,
+-) -> Result<Built, String> {
++/// `noise [1, LDIM]`, the first flow step's time condition `ts [1, FLOW_D]` and length
++/// `dt [1, 1]` (see [`step_times`]), and the ring `k_all_in`/`v_all_in [L, H, ctx, HD]`.
++/// Outputs: `next_latent` after that first step and `eos` for the last position, the
++/// transformer's `cond [1, D]` the later steps take, and `k_new`/`v_new [L, H, t, HD]` for the
++/// host to store.
++pub fn build(wt: &Weights, dm: &Dims, ctx: usize, t: usize) -> Result<Built, String> {
+     let mut b = Builder::new().with_float(FP);
+     let emb = b.input("emb", FP, &[1, t, dm.d]);
+     let cos = b.input("cos", FP, &[1, 1, t, dm.hd() / 2]);
+     let sin = b.input("sin", FP, &[1, 1, t, dm.hd() / 2]);
+     let mask = b.input("mask", FP, &[1, 1, t, ctx + t]);
+     let noise = b.input("noise", FP, &[1, dm.ldim]);
++    let ts = b.input("ts", FP, &[1, dm.flow_d]);
++    let dt = b.input("dt", FP, &[1, 1]);
+     let k_all = b.input("k_all_in", FP, &[dm.layers, dm.heads, ctx, dm.hd()]);
+     let v_all = b.input("v_all_in", FP, &[dm.layers, dm.heads, ctx, dm.hd()]);
+ 
+@@ -356,10 +375,10 @@ pub fn build(
+     let ew = w(&mut b, wt, "flow_lm.out_eos.weight")?;
+     let eb = w(&mut b, wt, "flow_lm.out_eos.bias")?;
+     let eos = b.linear(&t_out, &ew, Some(&eb), &[1, 1]);
+-    let dir = flow_net(dm, &mut b, wt, &t_out, &noise, time_norm)?;
+-    let next = b.add(&noise, &dir, &[1, dm.ldim]);
++    let next = euler_step(dm, &mut b, wt, &t_out, &noise, &ts, &dt)?;
+     let next = b.alias(&next, "next_latent");
+     let eos = b.alias(&eos, "eos");
++    let cond = b.alias(&t_out, "cond");
+     // Only this call's rows, for every layer: [L, H, t, HD], 18 KB at t = 1.
+     let ks: Vec<&Var> = rows.iter().step_by(2).collect();
+     let vs: Vec<&Var> = rows.iter().skip(1).step_by(2).collect();
+@@ -367,7 +386,37 @@ pub fn build(
+     let v = b.concat(&vs, 0, &[dm.layers, dm.heads, t, dm.hd()]);
+     let k_new = b.alias(&k, "k_new");
+     let v_new = b.alias(&v, "v_new");
+-    Ok(b.finish_with_weights(&[&next, &eos, &k_new, &v_new]))
++    Ok(b.finish_with_weights(&[&next, &eos, &cond, &k_new, &v_new]))
++}
++
++/// One Euler step of the flow: `x + dt * flow_net(cond, x, ts)`, as `lsd_decode` takes it.
++fn euler_step(
++    dm: &Dims,
++    b: &mut Builder,
++    wt: &Weights,
++    cond: &Var,
++    x: &Var,
++    ts: &Var,
++    dt: &Var,
++) -> Result<Var, String> {
++    let dir = flow_net(dm, b, wt, cond, x, ts)?;
++    let dir = b.mul(&dir, dt, &[1, dm.ldim]);
++    Ok(b.add(x, &dir, &[1, dm.ldim]))
++}
++
++/// The flow net alone, for every step after the first, which [`build`]'s graph takes.
++///
++/// Inputs: the transformer's `cond [1, D]`, the latent so far `x [1, LDIM]`, and the step's
++/// `ts [1, FLOW_D]` and `dt [1, 1]`. Output: `next_latent [1, LDIM]`.
++pub fn build_step(wt: &Weights, dm: &Dims) -> Result<Built, String> {
++    let mut b = Builder::new().with_float(FP);
++    let cond = b.input("cond", FP, &[1, dm.d]);
++    let x = b.input("x", FP, &[1, dm.ldim]);
++    let ts = b.input("ts", FP, &[1, dm.flow_d]);
++    let dt = b.input("dt", FP, &[1, 1]);
++    let next = euler_step(dm, &mut b, wt, &cond, &x, &ts, &dt)?;
++    let next = b.alias(&next, "next_latent");
++    Ok(b.finish_with_weights(&[&next]))
+ }
+ 
+ #[cfg(test)]
+diff --git a/ptts-ffi/include/ptts.h b/ptts-ffi/include/ptts.h
+index 49e4f0e..cc1c7ca 100644
+--- a/ptts-ffi/include/ptts.h
++++ b/ptts-ffi/include/ptts.h
+@@ -38,6 +38,11 @@ const char *ptts_voices(const PttsHandle *h);
+ bool ptts_set_voice(PttsHandle *h, const char *name);
+ /// Normalize text as `lang` (en, fr, de, es, pt or none) from the next ptts_speak on, with no reload.
+ bool ptts_set_language(PttsHandle *h, const char *lang);
++/// Take `steps` Euler steps of the flow per frame from the next ptts_speak on: more is cleaner and
++/// slower. A bundle starts at its checkpoint's own number.
++bool ptts_set_steps(PttsHandle *h, uint32_t steps);
++/// Euler steps of the flow per frame.
++uint32_t ptts_steps(const PttsHandle *h);
+ /// The languages the model was trained for, NUL-separated like ptts_voices. Borrowed.
+ const char *ptts_languages(const PttsHandle *h);
+ /// The last error on `h`, or the last ptts_new failure on this thread when `h` is NULL.
+diff --git a/ptts-ffi/src/coreml.rs b/ptts-ffi/src/coreml.rs
+index 088f623..215f70e 100644
+--- a/ptts-ffi/src/coreml.rs
++++ b/ptts-ffi/src/coreml.rs
+@@ -8,6 +8,7 @@ use ptts::plan::Chunk;
+ use ptts::preprocess::Normalize;
+ use ptts_coreml::Weights;
+ use ptts_coreml::phonon::driver::{Config, Phonon, Voice};
++use ptts_coreml::phonon::flow_lm::TimeNorm;
+ use ptts_coreml::run::Compute;
+ use std::path::{Path, PathBuf};
+ 
+@@ -52,6 +53,11 @@ impl Engine {
+             |v: &serde_json::Value, k: &str| v[k].as_f64().ok_or(format!("bundle.json has no {k}"));
+         let int = |k: &str| get(&meta, k).map(|v| v as usize);
+         let dim = |k: &str| get(&meta["dims"], k).map(|v| v as usize);
++        let time_norm = match meta["time_norm"].as_str() {
++            Some("rms") => TimeNorm::Rms,
++            Some("rms_var") => TimeNorm::RmsVar,
++            _ => return Err("bundle.json has no time_norm: re-export it with export_coreml".into()),
++        };
+         let cfg = Config {
+             dims: ptts_coreml::phonon::flow_lm::Dims {
+                 d: dim("d")?,
+@@ -69,6 +75,8 @@ impl Engine {
+             eos_threshold: get(&meta, "eos_threshold")? as f32,
+             temperature: get(&meta, "temperature")? as f32,
+             seed: 0,
++            steps: int("steps")?,
++            time_norm,
+             flow_unit,
+         };
+         let voices = voice_names(dir);
+@@ -103,6 +111,15 @@ impl Engine {
+         self.phonon.set_voice(load_voice(&self.dir, name)?)
+     }
+ 
++    /// Take `steps` Euler steps of the flow per frame from the next utterance on.
++    pub fn set_steps(&mut self, steps: usize) -> Result<(), String> {
++        self.phonon.set_steps(steps)
++    }
++
++    pub fn steps(&self) -> usize {
++        self.phonon.steps()
++    }
++
+     /// Normalize text as `lang` from the next utterance on.
+     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
+         self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+diff --git a/ptts-ffi/src/cpu.rs b/ptts-ffi/src/cpu.rs
+index 6a2681c..11c1009 100644
+--- a/ptts-ffi/src/cpu.rs
++++ b/ptts-ffi/src/cpu.rs
+@@ -25,6 +25,8 @@ pub struct Engine {
+     normalize: Normalize,
+     /// Samples per frame, to count frames in what the stream hands back.
+     frame_size: usize,
++    /// The checkpoint's flow steps per frame, which `synth` is built with.
++    steps: usize,
+ }
+ 
+ impl Engine {
+@@ -44,6 +46,7 @@ impl Engine {
+                 ),
+             )?;
+         let frame_rate = cfg.mimi.frame_rate;
++        let steps = cfg.lsd_decode_steps;
+         let mut builder = SynthBuilder::new(cfg, weights, Normalize::OFF)
+             .tokenizer_file(dir.join("tokenizer.json"))
+             .device(DeviceKind::Cpu)
+@@ -60,6 +63,7 @@ impl Engine {
+             normalize,
+             synth,
+             frame_size,
++            steps,
+         })
+     }
+ 
+@@ -77,6 +81,19 @@ impl Engine {
+         Ok(())
+     }
+ 
++    /// The CPU engine speaks with the checkpoint's own number of flow steps, which its
++    /// `config.json` sets.
++    pub fn set_steps(&mut self, steps: usize) -> Result<(), String> {
++        if steps == self.steps {
++            return Ok(());
++        }
++        Err(format!("the CPU engine takes the checkpoint's {} flow steps", self.steps))
++    }
++
++    pub fn steps(&self) -> usize {
++        self.steps
++    }
++
+     /// Normalize text as `lang` from the next utterance on.
+     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
+         self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+diff --git a/ptts-ffi/src/lib.rs b/ptts-ffi/src/lib.rs
+index 0cd692a..77e3c52 100644
+--- a/ptts-ffi/src/lib.rs
++++ b/ptts-ffi/src/lib.rs
+@@ -211,6 +211,33 @@ pub unsafe extern "C" fn ptts_set_language(h: *mut PttsHandle, lang: *const c_ch
+     }
+ }
+ 
++/// Take `steps` Euler steps of the flow per frame from the next `ptts_speak` on: more is cleaner
++/// and slower, each costing one more run of the flow net. A bundle starts at its checkpoint's
++/// own number. Returns false on failure; see `ptts_last_error`.
++///
++/// # Safety
++/// `h` must come from `ptts_new`.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_set_steps(h: *mut PttsHandle, steps: u32) -> bool {
++    let h = unsafe { &mut *h };
++    match guarded(|| h.engine.set_steps(steps as usize)) {
++        Ok(()) => true,
++        Err(e) => {
++            h.last_error = Some(c_string(&e));
++            false
++        }
++    }
++}
++
++/// Euler steps of the flow per frame, as `ptts_set_steps` last set them.
++///
++/// # Safety
++/// `h` must come from `ptts_new`.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn ptts_steps(h: *const PttsHandle) -> u32 {
++    unsafe { (*h).engine.steps() as u32 }
++}
++
+ /// The last error on `h`, or, when `h` is null, the last `ptts_new` failure on this thread.
+ /// Borrowed until the next failing call.
+ ///
+diff --git a/ptts/examples/export_coreml.rs b/ptts/examples/export_coreml.rs
+index 3320462..bf6f52e 100644
+--- a/ptts/examples/export_coreml.rs
++++ b/ptts/examples/export_coreml.rs
+@@ -1,7 +1,7 @@
+ //! Export a checkpoint as Core ML models for the iOS and macOS package (`ios/PhononTTS`).
+ //!
+ //! Writes one directory: the flow LM as two ML Programs (one step, and the batched text
+-//! prefill), the Mimi decoder, the few tensors the driver applies on the host, the tokenizer,
++//! prefill), the flow net alone for the flow's later steps, the Mimi decoder, the few tensors the driver applies on the host, the tokenizer,
+ //! the voices, and a `bundle.json` describing it all with every file's size and SHA-256.
+ //!
+ //! ```bash
+@@ -82,11 +82,6 @@ fn main() -> Result<()> {
+         flow_d: f.flow_dim,
+         flow_blocks: f.flow_depth,
+     };
+-    anyhow::ensure!(
+-        cfg.lsd_decode_steps == 1,
+-        "the Core ML graph takes one flow step; this checkpoint wants {}",
+-        cfg.lsd_decode_steps
+-    );
+     let time_norm = match f.time_rms_norm {
+         ptts::flow_lm::TimeRmsNorm::Rms => fl::TimeNorm::Rms,
+         ptts::flow_lm::TimeRmsNorm::RmsVar => fl::TimeNorm::RmsVar,
+@@ -195,13 +190,10 @@ fn main() -> Result<()> {
+     let ctx = vlen + args.max_tokens + max_frames + 16;
+     tracing::info!(?dims, vlen, max_frames, ctx, "building graphs");
+     let bad = |e: String| anyhow::anyhow!(e);
+-    write(
+-        &args.out,
+-        &fl::package_name(ctx, 1),
+-        fl::build(&wt, &dims, ctx, 1, time_norm).map_err(bad)?,
+-    )?;
+-    let prefill = fl::build(&wt, &dims, ctx, args.max_tokens, time_norm).map_err(bad)?;
++    write(&args.out, &fl::package_name(ctx, 1), fl::build(&wt, &dims, ctx, 1).map_err(bad)?)?;
++    let prefill = fl::build(&wt, &dims, ctx, args.max_tokens).map_err(bad)?;
+     write(&args.out, &fl::package_name(ctx, args.max_tokens), prefill)?;
++    write(&args.out, fl::STEP_PACKAGE, fl::build_step(&wt, &dims).map_err(bad)?)?;
+     write(
+         &args.out,
+         &mimi::package_name(window),
+@@ -216,8 +208,17 @@ fn main() -> Result<()> {
+         defaults.entry(name.clone()).or_insert_with(|| value.clone());
+     }
+     let mut host: Vec<(&str, Vec<usize>, Vec<u8>)> = Vec::new();
+-    for n in ["flow_lm.conditioner.embed.weight", "flow_lm.input_linear.weight", "flow_lm.bos_emb"]
+-    {
++    // The time embedders too, which the driver evaluates for whatever number of flow steps the
++    // app asks for.
++    let time_embed: Vec<String> = (0..2)
++        .flat_map(|i| {
++            fl::TIME_EMBED_TENSORS.map(|t| format!("flow_lm.flow_net.time_embed.{i}.{t}"))
++        })
++        .collect();
++    let names = ["flow_lm.conditioner.embed.weight", "flow_lm.input_linear.weight", "flow_lm.bos_emb"]
++        .into_iter()
++        .chain(time_embed.iter().map(String::as_str));
++    for n in names {
+         let (shape, data) = get(n)?;
+         host.push((n, shape.to_vec(), data.iter().flat_map(|v| v.to_le_bytes()).collect()));
+     }
+@@ -258,6 +259,11 @@ fn main() -> Result<()> {
+         "mimi_window": window,
+         "eos_threshold": cfg.eos_threshold,
+         "temperature": args.temperature,
++        "steps": cfg.lsd_decode_steps,
++        "time_norm": match time_norm {
++            fl::TimeNorm::Rms => "rms",
++            fl::TimeNorm::RmsVar => "rms_var",
++        },
+         "dims": {
+             "d": dims.d, "heads": dims.heads, "layers": dims.layers, "ff": dims.ff,
+             "ldim": dims.ldim, "flow_d": dims.flow_d, "flow_blocks": dims.flow_blocks,

@@ -13,7 +13,6 @@ let package = Package(
   ],
   dependencies: [
     .package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.17.7", traits: []),
-    .package(url: "https://github.com/gradium-ai/xn-ptts.git", from: "0.4.2"),
   ],
   targets: [
     .target(name: "PDFStructure"),
@@ -32,9 +31,21 @@ let package = Package(
     .target(name: "MagpieEngine", dependencies: ["Synthesis"]),
     .target(name: "OmniVoiceEngine", dependencies: ["Synthesis"]),
     .target(name: "ChatterboxEngine", dependencies: ["Synthesis"]),
+    // Phonon's Rust core, built from xn-ptts 0.4.2 with tools/phonon-coreml/steps.patch by its
+    // ios/build-xcframework.sh, and the Swift wrapper around it.
+    .binaryTarget(
+      name: "PhononCore",
+      url:
+        "https://huggingface.co/itsmechico/phonon-core-runtime/resolve/d70123932f1de84a824b160a423d136ac9a6b248/PhononCore.xcframework.zip",
+      checksum: "61cedbdd9555b08939739ffa607b0465a3baca5aa04ffe0ad8e7bf952264549a"),
     .target(
-      name: "PhononEngine",
-      dependencies: ["Synthesis", .product(name: "ptts", package: "xn-ptts")]),
+      name: "PhononTTS",
+      dependencies: ["PhononCore"],
+      linkerSettings: [
+        .linkedFramework("CoreML"), .linkedFramework("CoreVideo"),
+        .linkedFramework("Accelerate"), .linkedFramework("AVFoundation"),
+      ]),
+    .target(name: "PhononEngine", dependencies: ["Synthesis", "PhononTTS"]),
     .target(
       name: "Engines",
       dependencies: [
