@@ -377,6 +377,8 @@ public enum SleepTimer: Sendable, Equatable, Hashable {
   }
 
   private func boundary(from previous: ReadingPosition, to next: ReadingPosition) -> Boundary {
+    // A heading is read with the longest pause around it, like a section break.
+    if script.isHeading(previous.block) || script.isHeading(next.block) { return .section }
     if script.section(containing: previous) != script.section(containing: next) { return .section }
     return previous.block == next.block ? .sentence : .paragraph
   }

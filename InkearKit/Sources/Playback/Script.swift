@@ -1,9 +1,12 @@
+import NaturalLanguage
 import PDFStructure
 
 /// A document as the sequence of sentences read aloud, with navigation.
 public struct Script: Sendable {
   public let structure: DocumentStructure
-  /// Sentence ranges per block, in each block's text.
+  /// The text each block is narrated as, one entry per block.
+  private let narrated: [String]
+  /// Sentence ranges per block, in each block's narrated text.
   private let ranges: [[Range<String.Index>]]
   /// Every sentence in reading order.
   private let positions: [ReadingPosition]
@@ -21,20 +24,23 @@ public struct Script: Sendable {
 
   public init(_ structure: DocumentStructure) {
     self.structure = structure
+    let narrated = structure.blocks.map(Self.narrate)
     var ranges: [[Range<String.Index>]] = []
     var positions: [ReadingPosition] = []
     var blockStarts = [0]
     var charactersBefore = [0]
     for (index, block) in structure.blocks.enumerated() {
-      let sentences = block.sentences
+      let text = narrated[index]
+      let sentences = Self.sentences(of: text)
       ranges.append(sentences)
       for (sentence, range) in sentences.enumerated() {
         positions.append(ReadingPosition(block: index, sentence: sentence))
         charactersBefore.append(
-          charactersBefore[charactersBefore.count - 1] + block.text[range].count)
+          charactersBefore[charactersBefore.count - 1] + text[range].count)
       }
       blockStarts.append(positions.count)
     }
+    self.narrated = narrated
     let sectionOrder = structure.sections.indices.sorted { a, b in
       (structure.sections[a].block, a) < (structure.sections[b].block, b)
     }
@@ -63,7 +69,28 @@ public struct Script: Sendable {
     guard ranges.indices.contains(position.block),
       ranges[position.block].indices.contains(position.sentence)
     else { return nil }
-    return String(structure.blocks[position.block].text[ranges[position.block][position.sentence]])
+    return String(narrated[position.block][ranges[position.block][position.sentence]])
+  }
+
+  /// Whether `block` is a heading, which the narrator reads with a longer pause around it.
+  public func isHeading(_ block: Int) -> Bool {
+    guard structure.blocks.indices.contains(block) else { return false }
+    if case .heading = structure.blocks[block].kind { return true }
+    return false
+  }
+
+  /// The text `block` is narrated as.
+  ///
+  /// A heading reads as separate sentences, so "Capítulo 1 — O menino que sentia o chão"
+  /// becomes "Capítulo 1. O menino que sentia o chão." and the narrator pauses between them.
+  static func narrate(_ block: Block) -> String {
+    guard case .heading = block.kind else { return block.text }
+    let text = block.text
+      .replacingOccurrences(of: " — ", with: ". ")
+      .replacingOccurrences(of: " – ", with: ". ")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let last = text.last, !".,!?……".contains(last) else { return text }
+    return text + "."
   }
 
   /// The first sentence after `position`, skipping blocks without sentences.
@@ -161,6 +188,25 @@ public struct Script: Sendable {
 }
 
 extension Script {
+  /// The ranges of `text`'s sentences, in order, trimmed of surrounding whitespace. A text
+  /// without sentence punctuation is one sentence. Empty or whitespace-only text has none.
+  private static func sentences(of text: String) -> [Range<String.Index>] {
+    let tokenizer = NLTokenizer(unit: .sentence)
+    tokenizer.string = text
+    return tokenizer.tokens(for: text.startIndex..<text.endIndex).compactMap {
+      trimmed($0, in: text)
+    }
+  }
+
+  /// `range` without leading and trailing whitespace, or nil when it has none left.
+  private static func trimmed(_ range: Range<String.Index>, in text: String) -> Range<String.Index>? {
+    let content = text[range]
+    guard let first = content.firstIndex(where: { !$0.isWhitespace }),
+      let last = content.lastIndex(where: { !$0.isWhitespace })
+    else { return nil }
+    return first..<text.index(after: last)
+  }
+
   /// Number of sentences strictly before `position`; the index of `position` when it is a sentence.
   private func sentenceIndex(atOrAfter position: ReadingPosition) -> Int {
     Self.partitionPoint(positions.count) { positions[$0] >= position }

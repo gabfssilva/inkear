@@ -73,6 +73,25 @@ import Testing
     #expect(script.text(at: position(1, 0)) == nil)
   }
 
+  @Test func headingsNarrateAsSeparateSentences() throws {
+    let script = makeScript(
+      ["Capítulo 1 — O menino que sentia o chão", "Havia uma vila."],
+      headings: [0])
+
+    #expect(script.sentences(inBlock: 0).count == 2)
+    #expect(try #require(script.text(at: position(0, 0))) == "Capítulo 1.")
+    #expect(try #require(script.text(at: position(0, 1))) == "O menino que sentia o chão.")
+    #expect(script.isHeading(0))
+    #expect(!script.isHeading(1))
+  }
+
+  @Test func headingsWithoutDashAreOneSentenceEndedByAPeriod() throws {
+    let script = makeScript(["Índice", "Um. Dois."], headings: [0])
+
+    #expect(script.sentences(inBlock: 0).count == 1)
+    #expect(try #require(script.text(at: position(0, 0))) == "Índice.")
+  }
+
   @Test func clampedMovesToTheSentenceAtOrBeforeThePosition() {
     let script = makeScript(["Um. Dois.", "", "Três."])
 
@@ -224,11 +243,15 @@ import Testing
   }
 
   private func makeScript(
-    _ texts: [String], sections: [Section] = [], mainStart: Int? = nil, pages: [Int]? = nil
+    _ texts: [String], sections: [Section] = [], mainStart: Int? = nil, pages: [Int]? = nil,
+    headings: [Int] = []
   ) -> Script {
     let pages = pages ?? texts.indices.map { $0 }
-    let blocks = zip(texts, pages).map { text, page in
-      Block(kind: .paragraph, text: text, pages: page...page)
+    let blocks = zip(texts.indices, zip(texts, pages)).map { index, pair in
+      let (text, page) = pair
+      return Block(
+        kind: headings.contains(index) ? .heading(level: 1) : .paragraph,
+        text: text, pages: page...page)
     }
     return Script(
       DocumentStructure(
